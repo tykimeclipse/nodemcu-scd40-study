@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>공부방 모니터</title>
+<script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:      #f5f4f0;
+    --surface: #ffffff;
+    --border:  #e8e6e0;
+    --text:    #1a1916;
+    --muted:   #8a8880;
+    --co2:     #10b981;
+    --temp:    #e05252;
+    --humi:    #3b82c4;
+    --lux:     #b07d2a;
+    --pm:      #7c3aed;
+    --good:    #10b981;
+    --warn:    #f59e0b;
+    --bad:     #ef4444;
+    --mono:    'DM Mono', monospace;
+    --sans:    'DM Sans', sans-serif;
+  }
+
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* ── 설정 화면 ── */
+  .config-screen {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 24px;
+  }
+  .config-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 32px; width: 100%; max-width: 420px;
+  }
+  .config-box h2 { font-size: 1.1rem; font-weight: 500; margin-bottom: 24px; }
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 6px; font-family: var(--mono); }
+  .field input {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: 8px; font-size: 0.85rem; font-family: var(--mono);
+    background: var(--bg); color: var(--text); outline: none;
+  }
+  .field input:focus { border-color: var(--co2); }
+  .btn-connect {
+    width: 100%; padding: 12px; background: var(--text); color: #fff;
+    border: none; border-radius: 8px; font-size: 0.9rem; cursor: pointer;
+    font-family: var(--sans); margin-top: 4px;
+  }
+  .btn-connect:hover { opacity: 0.85; }
+  .config-error { color: var(--bad); font-size: 0.8rem; margin-top: 12px; font-family: var(--mono); }
+
+  /* ── 메인 레이아웃 ── */
+  #main-content { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 24px;
+  }
+  .logo { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
+  h1 { font-size: 1.15rem; font-weight: 500; }
+
+  .status-pill {
+    display: flex; align-items: center; gap: 7px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 20px; padding: 6px 14px; font-size: 0.78rem;
+    font-family: var(--mono);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--good); box-shadow: 0 0 6px var(--good); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* ── 재실 배너 ── */
+  .occupancy-banner {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 20px; margin-bottom: 20px;
+    transition: all .3s;
+  }
+  .occupancy-banner.occupied {
+    border-color: var(--good); background: #f0fdf4;
+  }
+  .occupancy-banner.empty {
+    border-color: var(--border); background: var(--surface);
+  }
+  .occ-label { font-size: 0.78rem; color: var(--muted); font-family: var(--mono); }
+  .occ-status { font-size: 1rem; font-weight: 500; }
+  .occ-status.occupied { color: var(--good); }
+  .occ-status.empty    { color: var(--muted); }
+  .occ-distance { font-family: var(--mono); font-size: 0.85rem; color: var(--muted); }
+
+  /* ── CO2 경고 배너 ── */
+  .co2-alert {
+    display: none; align-items: center; gap: 12px;
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 16px;
+    font-size: 0.88rem; font-weight: 500;
+  }
+  .co2-alert.warn  { display: flex; background: #fffbeb; border: 1px solid #fcd34d; color: #92400e; }
+  .co2-alert.bad   { display: flex; background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; }
+
+  /* ── 카드 ── */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px; margin-bottom: 20px;
+  }
+  @media(max-width:640px) { .cards { grid-template-columns: repeat(2, 1fr); } }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px; position: relative; overflow: hidden;
+  }
+  .card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0;
+    height: 3px; border-radius: 12px 12px 0 0;
+  }
+  .card.co2::before  { background: var(--co2);  }
+  .card.temp::before { background: var(--temp); }
+  .card.humi::before { background: var(--humi); }
+  .card.lux::before  { background: var(--lux);  }
+
+  .card-label { font-size: 0.72rem; color: var(--muted); font-family: var(--mono); margin-bottom: 8px; }
+  .card-value { font-family: var(--mono); font-size: 1.6rem; font-weight: 500; line-height: 1; }
+  .card-value .unit { font-size: 0.75rem; color: var(--muted); margin-left: 3px; }
+  .card-sub   { font-size: 0.72rem; color: var(--muted); margin-top: 8px; font-family: var(--mono); }
+
+  .card.co2  .card-value { color: var(--co2);  }
+  .card.temp .card-value { color: var(--temp); }
+  .card.humi .card-value { color: var(--humi); }
+  .card.lux  .card-value { color: var(--lux);  }
+
+  /* CO2 색상 동적 변경 */
+  .card.co2.warn .card-value { color: var(--warn); }
+  .card.co2.warn::before     { background: var(--warn); }
+  .card.co2.bad  .card-value { color: var(--bad);  }
+  .card.co2.bad::before      { background: var(--bad);  }
+
+  /* ── 그래프 ── */
+  .charts { display: flex; flex-direction: column; gap: 16px; margin-bottom: 20px; }
+  .chart-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 18px 8px;
+  }
+  .chart-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .chart-title { font-size: 0.82rem; font-family: var(--mono); color: var(--muted); }
+  .range-tabs  { display: flex; gap: 4px; }
+  .range-tab {
+    padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 0.72rem; font-family: var(--mono); cursor: pointer;
+    background: transparent; color: var(--muted); transition: all .15s;
+  }
+  .range-tab.active { background: var(--text); color: #fff; border-color: var(--text); }
+
+  /* ── 미세먼지 ── */
+  .pm-section {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 18px 8px; margin-bottom: 20px;
+  }
+  .pm-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;
+  }
+  .pm-title { font-size: 0.82rem; font-family: var(--mono); color: var(--muted); }
+  .pm-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .pm-card  {
+    background: var(--bg); border-radius: 8px; padding: 12px 14px;
+  }
+  .pm-card-label { font-size: 0.7rem; color: var(--muted); font-family: var(--mono); margin-bottom: 6px; }
+  .pm-card-value { font-family: var(--mono); font-size: 1.4rem; font-weight: 500; color: var(--pm); }
+  .pm-card-value .unit { font-size: 0.7rem; color: var(--muted); }
+  .pm-card-sub   { font-size: 0.7rem; margin-top: 4px; font-family: var(--mono); }
+
+  .grade-good    { color: #10b981; font-weight: 500; }
+  .grade-normal  { color: #3b82c4; font-weight: 500; }
+  .grade-bad     { color: #f59e0b; font-weight: 500; }
+  .grade-verybad { color: #ef4444; font-weight: 500; }
+
+  /* ── 테이블 ── */
+  .table-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px; overflow-x: auto;
+  }
+  .table-title { font-size: 0.82rem; font-family: var(--mono); color: var(--muted); margin-bottom: 14px; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.78rem; }
+  th { text-align: left; color: var(--muted); font-weight: 400; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 7px 0; border-bottom: 1px solid var(--border); color: var(--text); }
+  td.occupied-cell { color: var(--good); font-weight: 500; }
+  td.empty-cell    { color: var(--muted); }
+
+  /* ── footer ── */
+  footer {
+    text-align: center; padding: 16px; font-size: 0.72rem;
+    color: var(--muted); font-family: var(--mono);
+  }
+  .btn-settings {
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 10px; font-family: var(--mono); font-size: 0.72rem;
+    color: var(--muted); cursor: pointer; margin-left: 10px;
+  }
+  .btn-settings:hover { border-color: var(--text); color: var(--text); }
+</style>
+</head>
+<body>
+
+<!-- 설정 화면 -->
+<div class="config-screen" id="config-screen">
+  <div class="config-box">
+    <h2>공부방 모니터 설정</h2>
+    <div class="field">
+      <label>Supabase Project URL</label>
+      <input id="inp-url" type="text" placeholder="https://xxxxxxxxxxx.supabase.co">
+    </div>
+    <div class="field">
+      <label>Supabase Anon Key</label>
+      <input id="inp-key" type="text" placeholder="eyJ...">
+    </div>
+    <div class="field">
+      <label>Device ID (선택 — 비워두면 전체)</label>
+      <input id="inp-device" type="text" placeholder="nodemcu-02">
+    </div>
+    <button class="btn-connect" onclick="connect()">연결</button>
+    <div class="config-error" id="config-error"></div>
+  </div>
+</div>
+
+<!-- 메인 대시보드 -->
+<div id="main-content" style="display:none">
+  <header>
+    <div>
+      <div class="logo">공부방 모니터 v1.0</div>
+      <h1>CO2 · 온도 · 습도 · 조도 · 재실</h1>
+    </div>
+    <div class="status-pill">
+      <div class="dot" id="live-dot"></div>
+      <span id="live-label">연결 중</span>
+    </div>
+  </header>
+
+  <!-- 재실 배너 -->
+  <div class="occupancy-banner" id="occ-banner">
+    <div>
+      <div class="occ-label">재실 상태</div>
+      <div class="occ-status" id="occ-status">—</div>
+    </div>
+    <div class="occ-distance" id="occ-distance">—</div>
+  </div>
+
+  <!-- CO2 경고 배너 -->
+  <div class="co2-alert" id="co2-alert">
+    <span id="co2-alert-icon">⚠️</span>
+    <span id="co2-alert-msg">—</span>
+  </div>
+
+  <!-- 카드 -->
+  <div class="cards">
+    <div class="card co2" id="card-co2">
+      <div class="card-label">CO2</div>
+      <div class="card-value" id="val-co2">--<span class="unit">ppm</span></div>
+      <div class="card-sub"  id="sub-co2">—</div>
+    </div>
+    <div class="card temp">
+      <div class="card-label">온도</div>
+      <div class="card-value" id="val-temp">--<span class="unit">°C</span></div>
+      <div class="card-sub"  id="sub-temp">—</div>
+    </div>
+    <div class="card humi">
+      <div class="card-label">습도</div>
+      <div class="card-value" id="val-humi">--<span class="unit">%</span></div>
+      <div class="card-sub"  id="sub-humi">—</div>
+    </div>
+    <div class="card lux">
+      <div class="card-label">조도</div>
+      <div class="card-value" id="val-lux">--<span class="unit">lx</span></div>
+      <div class="card-sub"  id="sub-lux">—</div>
+    </div>
+  </div>
+
+  <!-- 그래프 -->
+  <div class="charts">
+    <!-- CO2 그래프 -->
+    <div class="chart-box">
+      <div class="chart-header">
+        <div class="chart-title">CO2 추이 (ppm)</div>
+        <div class="range-tabs">
+          <button class="range-tab active" onclick="setRange(1,this)">1h</button>
+          <button class="range-tab" onclick="setRange(6,this)">6h</button>
+          <button class="range-tab" onclick="setRange(24,this)">24h</button>
+          <button class="range-tab" onclick="setRange(168,this)">7d</button>
+        </div>
+      </div>
+      <div id="chart-co2"></div>
+    </div>
+
+    <!-- 온도/습도 그래프 -->
+    <div class="chart-box">
+      <div class="chart-header">
+        <div class="chart-title">온도 · 습도 추이</div>
+      </div>
+      <div id="chart-temphumi"></div>
+    </div>
+
+    <!-- 조도 그래프 -->
+    <div class="chart-box">
+      <div class="chart-header">
+        <div class="chart-title">조도 추이 (lx)</div>
+      </div>
+      <div id="chart-lux"></div>
+    </div>
+  </div>
+
+  <!-- 미세먼지 -->
+  <div class="pm-section">
+    <div class="pm-header">
+      <div class="pm-title">실외 미세먼지 <span style="font-size:0.6rem">(수내동)</span></div>
+      <div class="range-tabs">
+        <button class="range-tab pm-range active" onclick="setPmRange(24,this)">24h</button>
+        <button class="range-tab pm-range" onclick="setPmRange(168,this)">7d</button>
+      </div>
+    </div>
+    <div class="pm-cards">
+      <div class="pm-card">
+        <div class="pm-card-label">미세먼지 PM10</div>
+        <div class="pm-card-value" id="val-pm10">--<span class="unit">㎍</span></div>
+        <div class="pm-card-sub"  id="sub-pm10">—</div>
+      </div>
+      <div class="pm-card">
+        <div class="pm-card-label">초미세먼지 PM2.5</div>
+        <div class="pm-card-value" id="val-pm25">--<span class="unit">㎍</span></div>
+        <div class="pm-card-sub"  id="sub-pm25">—</div>
+      </div>
+    </div>
+    <div id="chart-pm"></div>
+  </div>
+
+  <!-- 최근 기록 테이블 -->
+  <div class="table-box">
+    <div class="table-title">최근 기록</div>
+    <table>
+      <thead>
+        <tr>
+          <th>시각</th><th>CO2</th><th>온도</th><th>습도</th><th>조도</th><th>재실</th><th>거리</th>
+        </tr>
+      </thead>
+      <tbody id="log-table"></tbody>
+    </table>
+  </div>
+
+  <footer>
+    <span id="footer-time">—</span>
+    <button class="btn-settings" onclick="resetSettings()">⚙ 설정</button>
+  </footer>
+</div>
+
+<script>
+// ─── 설정 저장/불러오기 ──────────────────
+const LS = {
+  save(url, key, device) {
+    localStorage.setItem('sb_url', url);
+    localStorage.setItem('sb_key', key);
+    localStorage.setItem('sb_device', device);
+  },
+  load() {
+    return {
+      url:    localStorage.getItem('sb_url')    || '',
+      key:    localStorage.getItem('sb_key')    || '',
+      device: localStorage.getItem('sb_device') || '',
+    };
+  },
+  clear() {
+    ['sb_url','sb_key','sb_device'].forEach(k => localStorage.removeItem(k));
+  }
+};
+
+// 저장된 설정 복원
+window.addEventListener('DOMContentLoaded', () => {
+  const s = LS.load();
+  if (s.url) document.getElementById('inp-url').value    = s.url;
+  if (s.key) document.getElementById('inp-key').value    = s.key;
+  if (s.device) document.getElementById('inp-device').value = s.device;
+  if (s.url && s.key) connect();
+});
+
+function resetSettings() {
+  LS.clear();
+  // 인터벌 정리
+  if (airQualityInterval) { clearInterval(airQualityInterval); airQualityInterval = null; }
+  // Realtime 구독 해제
+  if (realtimeSub) { realtimeSub.unsubscribe(); realtimeSub = null; }
+  // 차트 정리
+  [chartCo2, chartTempHumi, chartLux, chartPm].forEach(c => { if (c) c.destroy(); });
+  chartCo2 = chartTempHumi = chartLux = chartPm = null;
+
+  document.getElementById('main-content').style.display = 'none';
+  document.getElementById('config-screen').style.display = 'flex';
+}
+
+// ─── 전역 변수 ────────────────────────────
+let sbClient, deviceFilter, currentHours = 1, currentPmHours = 24;
+let chartCo2, chartTempHumi, chartLux, chartPm;
+let realtimeSub, airQualityInterval;
+
+// ─── CO2 등급 ─────────────────────────────
+function co2Grade(v) {
+  if (v < 700)  return { text: '좋음',    cls: 'good'  };
+  if (v < 1000) return { text: '보통',    cls: 'normal'};
+  if (v < 1500) return { text: '주의',    cls: 'warn'  };
+  return              { text: '위험',    cls: 'bad'   };
+}
+
+// ─── 날짜 포맷 ────────────────────────────
+function fmtTime(ts) {
+  const d = new Date(ts);
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  const hh = String(d.getHours()).padStart(2,'0');
+  const mi = String(d.getMinutes()).padStart(2,'0');
+  return `${mm}/${dd} ${hh}:${mi}`;
+}
+
+// ─── 연결 ─────────────────────────────────
+async function connect() {
+  const url    = document.getElementById('inp-url').value.trim();
+  const key    = document.getElementById('inp-key').value.trim();
+  const device = document.getElementById('inp-device').value.trim();
+  const errEl  = document.getElementById('config-error');
+  errEl.textContent = '';
+
+  if (!url || !key) { errEl.textContent = 'URL과 Key를 입력해주세요.'; return; }
+
+  try {
+    sbClient     = supabase.createClient(url, key);
+    deviceFilter = device || null;
+    LS.save(url, key, device);
+
+    document.getElementById('config-screen').style.display = 'none';
+    document.getElementById('main-content').style.display  = 'block';
+
+    initCharts();
+    await loadData();
+    subscribeRealtime();
+    fetchAirQuality();
+    if (airQualityInterval) clearInterval(airQualityInterval);
+    airQualityInterval = setInterval(fetchAirQuality, 60 * 60 * 1000);
+  } catch(e) {
+    errEl.textContent = '연결 실패: ' + e.message;
+  }
+}
+
+// ─── 차트 옵션 ────────────────────────────
+function makeLineOpts(color, unit, annotations = []) {
+  return {
+    series: [{ name: unit, data: [] }],
+    chart: {
+      type: 'area', height: 200,
+      animations: { enabled: true, easing: 'easeinout', speed: 800 },
+      toolbar: { show: false }, zoom: { enabled: false },
+      fontFamily: "'DM Mono', monospace", background: 'transparent',
+    },
+    colors: [color],
+    fill: { type: 'gradient', gradient: { opacityFrom: 0.3, opacityTo: 0.02 } },
+    stroke: { curve: 'smooth', width: 2 },
+    dataLabels: { enabled: false },
+    markers: { size: 0 },
+    xaxis: {
+      type: 'datetime',
+      labels: {
+        style: { colors: '#8a8880', fontSize: '10px', fontFamily: "'DM Mono', monospace" },
+        datetimeUTC: false,
+        datetimeFormatter: { hour: 'HH:mm', day: 'MM/dd' }
+      },
+      axisBorder: { show: false }, axisTicks: { show: false },
+    },
+    yaxis: {
+      labels: {
+        style: { colors: '#8a8880', fontSize: '10px', fontFamily: "'DM Mono', monospace" },
+      }
+    },
+    annotations: { yaxis: annotations },
+    grid: { borderColor: '#ece9e2', strokeDashArray: 3, xaxis: { lines: { show: false } } },
+    tooltip: {
+      x: { format: 'MM/dd HH:mm' }, theme: 'light',
+      style: { fontFamily: "'DM Mono', monospace", fontSize: '12px' }
+    },
+  };
+}
+
+function makeTempHumiOpts() {
+  const base = makeLineOpts('#e05252', '°C');
+  base.series = [
+    { name: '온도(°C)', data: [] },
+    { name: '습도(%)',  data: [] },
+  ];
+  base.colors = ['#e05252', '#3b82c4'];
+  base.chart.height = 200;
+  base.yaxis = [
+    { seriesName: '온도(°C)', labels: { style: { colors: '#e05252', fontSize: '10px', fontFamily: "'DM Mono', monospace" } } },
+    { seriesName: '습도(%)',  opposite: true, labels: { style: { colors: '#3b82c4', fontSize: '10px', fontFamily: "'DM Mono', monospace" } } },
+  ];
+  base.legend = {
+    show: true, position: 'top', horizontalAlign: 'right',
+    fontFamily: "'DM Mono', monospace", fontSize: '11px',
+    markers: { width: 8, height: 8, radius: 2 }
+  };
+  return base;
+}
+
+function makeCo2Opts() {
+  const opts = makeLineOpts('#10b981', 'ppm', [
+    { y: 1000, borderColor: '#f59e0b', strokeDashArray: 4,
+      label: { text: '주의 1000', style: { fontFamily: "'DM Mono', monospace", fontSize: '10px', color: '#f59e0b', background: 'transparent' } } },
+    { y: 1500, borderColor: '#ef4444', strokeDashArray: 4,
+      label: { text: '위험 1500', style: { fontFamily: "'DM Mono', monospace", fontSize: '10px', color: '#ef4444', background: 'transparent' } } },
+  ]);
+  opts.yaxis.min = 400;
+  opts.tooltip.y = { formatter: v => v != null ? v.toFixed(0) + ' ppm' : '' };
+  return opts;
+}
+
+function makePmOpts() {
+  return {
+    series: [
+      { name: 'PM10',  data: [] },
+      { name: 'PM2.5', data: [] }
+    ],
+    chart: {
+      type: 'line', height: 180,
+      animations: { enabled: true }, toolbar: { show: false }, zoom: { enabled: false },
+      fontFamily: "'DM Mono', monospace", background: 'transparent',
+    },
+    colors: ['#7c3aed', '#e05252'],
+    stroke: { curve: 'smooth', width: [2.5, 2.5] },
+    markers: { size: 0 },
+    dataLabels: { enabled: false },
+    legend: {
+      show: true, position: 'top', horizontalAlign: 'right',
+      fontFamily: "'DM Mono', monospace", fontSize: '11px',
+      markers: { width: 8, height: 8, radius: 2 }
+    },
+    xaxis: {
+      type: 'datetime',
+      labels: {
+        style: { colors: '#8a8880', fontSize: '10px', fontFamily: "'DM Mono', monospace" },
+        datetimeUTC: false,
+        datetimeFormatter: { hour: 'HH:mm', day: 'MM/dd' }
+      },
+      axisBorder: { show: false }, axisTicks: { show: false },
+    },
+    yaxis: {
+      min: 0,
+      labels: { style: { colors: '#8a8880', fontSize: '10px', fontFamily: "'DM Mono', monospace" } }
+    },
+    annotations: {
+      yaxis: [
+        { y: 35, borderColor: '#f59e0b', strokeDashArray: 4,
+          label: { text: 'PM2.5 나쁨', style: { fontFamily: "'DM Mono', monospace", fontSize: '10px', color: '#f59e0b', background: 'transparent' } } },
+        { y: 80, borderColor: '#f59e0b', strokeDashArray: 4,
+          label: { text: 'PM10 나쁨',  style: { fontFamily: "'DM Mono', monospace", fontSize: '10px', color: '#f59e0b', background: 'transparent' } } },
+      ]
+    },
+    grid: { borderColor: '#ece9e2', strokeDashArray: 3 },
+    tooltip: {
+      x: { format: 'MM/dd HH:mm' },
+      y: { formatter: v => v != null ? v.toFixed(0) + ' ㎍/㎥' : '' },
+      theme: 'light', style: { fontFamily: "'DM Mono', monospace", fontSize: '12px' }
+    },
+  };
+}
+
+function initCharts() {
+  chartCo2      = new ApexCharts(document.getElementById('chart-co2'),      makeCo2Opts());
+  chartTempHumi = new ApexCharts(document.getElementById('chart-temphumi'), makeTempHumiOpts());
+  chartLux      = new ApexCharts(document.getElementById('chart-lux'),      makeLineOpts('#b07d2a', 'lx'));
+  chartPm       = new ApexCharts(document.getElementById('chart-pm'),       makePmOpts());
+  chartCo2.render();
+  chartTempHumi.render();
+  chartLux.render();
+  chartPm.render();
+}
+
+// ─── 카드/배너 업데이트 ───────────────────
+function updateCards(row) {
+  const co2  = row.co2  ?? null;
+  const temp = row.temperature ?? null;
+  const humi = row.humidity    ?? null;
+  const lux  = row.lux         ?? null;
+  const occ  = row.occupied    ?? null;
+  const dist = row.distance    ?? null;
+  const ts   = fmtTime(row.created_at);
+
+  // CO2 카드
+  const cardCo2 = document.getElementById('card-co2');
+  if (co2 !== null) {
+    const g = co2Grade(co2);
+    document.getElementById('val-co2').innerHTML = `${co2}<span class="unit">ppm</span>`;
+    document.getElementById('sub-co2').textContent = ts;
+    cardCo2.className = `card co2 ${g.cls}`;
+
+    // CO2 경고 배너
+    const alertEl = document.getElementById('co2-alert');
+    alertEl.className = 'co2-alert';
+    if (co2 >= 1500) {
+      alertEl.classList.add('bad');
+      document.getElementById('co2-alert-msg').textContent = `CO2 ${co2}ppm — 즉시 환기하세요!`;
+    } else if (co2 >= 1000) {
+      alertEl.classList.add('warn');
+      document.getElementById('co2-alert-msg').textContent = `CO2 ${co2}ppm — 환기를 권장합니다`;
+    }
+  }
+
+  // 온도/습도/조도 카드
+  if (temp !== null) {
+    document.getElementById('val-temp').innerHTML = `${temp.toFixed(1)}<span class="unit">°C</span>`;
+    document.getElementById('sub-temp').textContent = ts;
+  }
+  if (humi !== null) {
+    document.getElementById('val-humi').innerHTML = `${humi.toFixed(1)}<span class="unit">%</span>`;
+    document.getElementById('sub-humi').textContent = ts;
+  }
+  if (lux !== null) {
+    document.getElementById('val-lux').innerHTML = `${Math.round(lux)}<span class="unit">lx</span>`;
+    document.getElementById('sub-lux').textContent = ts;
+  }
+
+  // 재실 배너
+  if (occ !== null) {
+    const banner   = document.getElementById('occ-banner');
+    const statusEl = document.getElementById('occ-status');
+    const distEl   = document.getElementById('occ-distance');
+    banner.className   = `occupancy-banner ${occ ? 'occupied' : 'empty'}`;
+    statusEl.className = `occ-status ${occ ? 'occupied' : 'empty'}`;
+    statusEl.textContent = occ ? '재실 중' : '비어 있음';
+    distEl.textContent = occ && dist != null ? `감지 거리: ${dist}cm` : '';
+  }
+
+  document.getElementById('footer-time').textContent = '최근 업데이트: ' + ts;
+}
+
+// ─── 데이터 로드 ──────────────────────────
+async function loadData() {
+  const since = new Date(Date.now() - currentHours * 60 * 60 * 1000).toISOString();
+  let q = sbClient
+    .from('study_env_logs')
+    .select('*')
+    .gte('created_at', since)
+    .order('created_at', { ascending: true })
+    .limit(2000);
+  if (deviceFilter) q = q.eq('device_id', deviceFilter);
+
+  const { data, error } = await q;
+  if (error) { console.error(error); return; }
+  if (!data || data.length === 0) return;
+
+  // 카드 업데이트 (최신값)
+  updateCards(data[data.length - 1]);
+
+  // 그래프 데이터
+  const co2Series  = data.filter(d => d.co2         != null).map(d => [new Date(d.created_at).getTime(), d.co2]);
+  const tempSeries = data.filter(d => d.temperature != null).map(d => [new Date(d.created_at).getTime(), d.temperature]);
+  const humiSeries = data.filter(d => d.humidity    != null).map(d => [new Date(d.created_at).getTime(), d.humidity]);
+  const luxSeries  = data.filter(d => d.lux         != null).map(d => [new Date(d.created_at).getTime(), d.lux]);
+
+  chartCo2.updateSeries([{ name: 'CO2', data: co2Series }]);
+  chartTempHumi.updateSeries([
+    { name: '온도(°C)', data: tempSeries },
+    { name: '습도(%)',  data: humiSeries },
+  ]);
+  chartLux.updateSeries([{ name: '조도', data: luxSeries }]);
+
+  // 테이블
+  renderTable(data.slice().reverse().slice(0, 20));
+
+  // 라이브 상태
+  document.getElementById('live-dot').className   = 'dot live';
+  document.getElementById('live-label').textContent = '실시간';
+}
+
+// ─── 테이블 렌더 ──────────────────────────
+function renderTable(rows) {
+  const tbody = document.getElementById('log-table');
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${fmtTime(r.created_at)}</td>
+      <td>${r.co2 ?? '—'} ppm</td>
+      <td>${r.temperature?.toFixed(1) ?? '—'} °C</td>
+      <td>${r.humidity?.toFixed(1) ?? '—'} %</td>
+      <td>${r.lux != null ? Math.round(r.lux) : '—'} lx</td>
+      <td class="${r.occupied ? 'occupied-cell' : 'empty-cell'}">${r.occupied ? '재실' : '비어있음'}</td>
+      <td>${r.distance != null ? r.distance + ' cm' : '—'}</td>
+    </tr>
+  `).join('');
+}
+
+// ─── Realtime 구독 ────────────────────────
+function subscribeRealtime() {
+  realtimeSub = sbClient
+    .channel('study_env_logs')
+    .on('postgres_changes', {
+      event: 'INSERT', schema: 'public', table: 'study_env_logs'
+    }, payload => {
+      const row = payload.new;
+      if (deviceFilter && row.device_id !== deviceFilter) return;
+
+      updateCards(row);
+
+      const ts = new Date(row.created_at).getTime();
+      if (row.co2         != null) chartCo2.appendData([{ data: [[ts, row.co2]] }]);
+      if (row.temperature != null) chartTempHumi.appendData([{ data: [[ts, row.temperature]] }, { data: [[ts, row.humidity]] }]);
+      if (row.lux         != null) chartLux.appendData([{ data: [[ts, row.lux]] }]);
+
+      // 테이블 맨 위에 추가
+      const tbody = document.getElementById('log-table');
+      const newRow = document.createElement('tr');
+      newRow.innerHTML = `
+        <td>${fmtTime(row.created_at)}</td>
+        <td>${row.co2 ?? '—'} ppm</td>
+        <td>${row.temperature?.toFixed(1) ?? '—'} °C</td>
+        <td>${row.humidity?.toFixed(1) ?? '—'} %</td>
+        <td>${row.lux != null ? Math.round(row.lux) : '—'} lx</td>
+        <td class="${row.occupied ? 'occupied-cell' : 'empty-cell'}">${row.occupied ? '재실' : '비어있음'}</td>
+        <td>${row.distance != null ? row.distance + ' cm' : '—'}</td>
+      `;
+      tbody.insertBefore(newRow, tbody.firstChild);
+      if (tbody.rows.length > 20) tbody.deleteRow(20);
+    })
+    .subscribe();
+}
+
+// ─── 시간 범위 변경 ───────────────────────
+async function setRange(hours, btn) {
+  document.querySelectorAll('.range-tab:not(.pm-range)').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentHours = hours;
+  await loadData();
+}
+
+// ─── 에어코리아 API ───────────────────────
+const AIRKOREA_KEY     = '5528246c7e459be2cfed3b98883597cb6a8845f23dc1fb931ab803b48a3a5370';
+const AIRKOREA_STATION = '수내동';
+
+function pmGrade(v, type) {
+  if (v === null || v === '-') return { text: '—', cls: '' };
+  const n = parseFloat(v);
+  if (type === 'pm10') {
+    if (n <= 30)  return { text: '좋음',     cls: 'grade-good' };
+    if (n <= 80)  return { text: '보통',     cls: 'grade-normal' };
+    if (n <= 150) return { text: '나쁨',     cls: 'grade-bad' };
+    return              { text: '매우나쁨', cls: 'grade-verybad' };
+  } else {
+    if (n <= 15)  return { text: '좋음',     cls: 'grade-good' };
+    if (n <= 35)  return { text: '보통',     cls: 'grade-normal' };
+    if (n <= 75)  return { text: '나쁨',     cls: 'grade-bad' };
+    return              { text: '매우나쁨', cls: 'grade-verybad' };
+  }
+}
+
+async function fetchAirQuality() {
+  try {
+    const rows = currentPmHours === 168 ? 168 : 24;
+    const term = currentPmHours === 168 ? 'month' : 'daily';
+    const url  = `https://apis.data.go.kr/B552584/ArpltnInforInqireSvc/getMsrstnAcctoRltmMesureDnsty` +
+      `?stationName=${encodeURIComponent(AIRKOREA_STATION)}&dataTerm=${term}` +
+      `&pageNo=1&numOfRows=${rows}&returnType=json&serviceKey=${AIRKOREA_KEY}&ver=1.0`;
+
+    const res   = await fetch(url);
+    const json  = await res.json();
+    const items = json?.response?.body?.items;
+    if (!items || items.length === 0) return;
+
+    const latest = items[0];
+    const g10    = pmGrade(latest.pm10Value, 'pm10');
+    const g25    = pmGrade(latest.pm25Value, 'pm25');
+
+    document.getElementById('val-pm10').innerHTML = latest.pm10Value && latest.pm10Value !== '-'
+      ? `${latest.pm10Value}<span class="unit">㎍</span>` : '--<span class="unit">㎍</span>';
+    document.getElementById('val-pm25').innerHTML = latest.pm25Value && latest.pm25Value !== '-'
+      ? `${latest.pm25Value}<span class="unit">㎍</span>` : '--<span class="unit">㎍</span>';
+    document.getElementById('sub-pm10').innerHTML = `<span class="${g10.cls}">${g10.text}</span>　${latest.dataTime || ''}`;
+    document.getElementById('sub-pm25').innerHTML = `<span class="${g25.cls}">${g25.text}</span>　${latest.dataTime || ''}`;
+
+    const sorted    = [...items].reverse();
+    const pm10Series = sorted.filter(d => d.pm10Value && d.pm10Value !== '-')
+      .map(d => [new Date(d.dataTime).getTime(), parseFloat(d.pm10Value)]);
+    const pm25Series = sorted.filter(d => d.pm25Value && d.pm25Value !== '-')
+      .map(d => [new Date(d.dataTime).getTime(), parseFloat(d.pm25Value)]);
+
+    chartPm.updateSeries([
+      { name: 'PM10',  data: pm10Series },
+      { name: 'PM2.5', data: pm25Series }
+    ]);
+  } catch(e) {
+    console.error('[에어코리아]', e);
+  }
+}
+
+async function setPmRange(hours, btn) {
+  document.querySelectorAll('.pm-range').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentPmHours = hours;
+  await fetchAirQuality();
+}
+</script>
+</body>
+</html>
