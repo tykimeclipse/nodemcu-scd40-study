@@ -4,46 +4,35 @@
  * 필요 라이브러리 (Arduino IDE > 라이브러리 관리자):
  *   - SparkFun SCD4x Arduino Library (SparkFun)
  *   - BH1750 (Christopher Laws)
- *   - MyLD2410 (iavorvel)
  *   - ArduinoJson (v7)
  *
  * 배선:
- *   SCD40  SDA → D2   SCL → D1   VCC → 3.3V    GND → GND
- *   BH1750 SDA → D2   SCL → D1   VCC → 3.3V    GND → GND
- *   LD2410 TX  → D5   RX  → D6   VCC → VIN(5V) GND → GND
+ *   SCD40  SDA → D2   SCL → D1   VCC → 3.3V   GND → GND
+ *   BH1750 SDA → D2   SCL → D1   VCC → 3.3V   GND → GND
+ *   LD2410 TX  → D7   RX  → D8   VCC → VIN(5V) GND → GND
  *   내장 LED   → D4 (경고 표시용, 별도 배선 불필요)
  *
  *   ※ SCD40, BH1750은 I2C 버스 공유 (SDA/SCL 같은 핀)
  *   ※ LD2410 VCC는 반드시 5V (VIN핀), 3.3V 연결 시 오동작
- *   ※ LD2410 보드레이트: HLKRadarTool로 115200으로 변경 필요
  */
 
 #include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecureBearSSL.h>
 #include <Wire.h>
-#include "SparkFun_SCD4x_Arduino_Library.h"
+#include <SparkFun_SCD4x_Arduino_Library.h>
 #include <BH1750.h>
 #include <SoftwareSerial.h>
-#include <MyLD2410.h>
 #include <ArduinoJson.h>
 
 // ═════════════════════════════════════════
 //  ★ 여기만 수정하세요
 // ═════════════════════════════════════════
-// WiFi AP 목록 (접속 가능한 것에 자동 연결)
-struct WifiAP { const char* ssid; const char* password; };
-const WifiAP WIFI_APS[] = {
-  { "doyoon1", "20080111" },
-  { "doyoon3", "20080111" },
-  { "doogie69", "20080111" },
-  // 필요하면 더 추가 가능
-};
-
-const char* SUPABASE_URL  = "https://dflyecjzeulllamfpaoe.supabase.co";
-const char* SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmbHllY2p6ZXVsbGxhbWZwYW9lIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwNDY5NjEsImV4cCI6MjA4ODYyMjk2MX0.tRc1bXQjMJE4yy24EIFjLgAPWjXiPhsyKmV6C2RGBAY";
-const char* DEVICE_ID     = "nodemcu-02";
+const char* WIFI_SSID     = "doyoon1";
+const char* WIFI_PASSWORD = "20080111";
+const char* SUPABASE_URL  = "https://tazjwlcaqrmekfxtdimw.supabase.co";
+const char* SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRhemp3bGNhcXJtZWtmeHRkaW13Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNzc3ODQsImV4cCI6MjA4Nzk1Mzc4NH0.JltLDKJIUrr9mCqgWYBXXQkPnNsHFYlqeDzU6bhJH10";
+const char* DEVICE_ID     = "nodemcu-03";
 
 #define LED_PIN D4          // 내장 LED (LOW=켜짐, HIGH=꺼짐)
 
@@ -68,11 +57,9 @@ const int MAX_SEND_RETRY = 3;
 const unsigned long MAX_NO_SEND = 600000;  // 10분간 전송 없으면 재시작
 
 // ─── 센서 객체 ───────────────────────────
-ESP8266WiFiMulti wifiMulti;
-SCD4x            scd40;
-BH1750           lightMeter;
-SoftwareSerial   radarSerial(D5, D6);  // RX=D5(LD2410 TX), TX=D6(LD2410 RX)
-MyLD2410         radar(radarSerial);
+SCD4x  scd40;
+BH1750            lightMeter;
+SoftwareSerial    ld2410Serial(D7, D8);  // RX=D7, TX=D8
 
 bool scd40Ok  = false;
 bool bh1750Ok = false;
@@ -83,31 +70,9 @@ long  sumCo2  = 0;
 int   sampleCount = 0;
 int   sampleFail  = 0;
 
-// ─── 급변 감지 (방향성) ──────────────────
-// 연속 N회 같은 방향으로 변화하면 급변으로 판단
-const int   TREND_COUNT   = 3;      // 연속 몇 회 같은 방향이면 급변
-const int   TREND_CO2_MIN = 20;     // CO2 방향 감지 최소 변화량 (ppm)
-const float TREND_TEMP_MIN = 0.3;   // 온도 방향 감지 최소 변화량 (°C)
-const float TREND_HUMI_MIN = 1.0;   // 습도 방향 감지 최소 변화량 (%)
-
-float prevCo2  = 0, prevTemp = NAN, prevHumi = NAN;
-int   trendCo2 = 0, trendTemp = 0,  trendHumi = 0;
-// 양수 = 상승 중, 음수 = 하강 중, 0 = 방향 없음
-
 // LD2410는 평균 내지 않고 최신값 사용
 bool occupied    = false;
 int  distanceCm  = 0;
-
-// ─── 조도/재실 이벤트 전송 ───────────────
-// ★ 임계값 조정 가능
-const float LUX_EVENT_THRESHOLD = 50.0;  // 조도 변화량 (lx) — 이 이상 변하면 즉시 전송
-const unsigned long OCC_DEBOUNCE_MS = 3000;  // 재실 상태 확정 대기 시간 (ms) — 노이즈 방지
-
-float prevLux         = -1;       // 직전 전송 조도값 (-1=초기값)
-bool  prevOccupied    = false;    // 직전 전송 재실상태
-bool  pendingOccupied = false;    // 감지 중인 재실상태 (확정 전)
-bool  occChanging     = false;    // 재실 상태 변화 감지 중
-unsigned long occChangeTime = 0;  // 재실 상태 변화 감지 시각
 
 // ─── 타이머 ──────────────────────────────
 unsigned long lastSampleTime  = 0;
@@ -140,33 +105,21 @@ void ledOff() { digitalWrite(LED_PIN, HIGH); }
 // ─── WiFi ────────────────────────────────
 bool connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) return true;
-
-  // AP 목록 등록 (중복 등록 방지)
-  static bool apsAdded = false;
-  if (!apsAdded) {
-    WiFi.mode(WIFI_STA);
-    for (auto& ap : WIFI_APS) wifiMulti.addAP(ap.ssid, ap.password);
-    apsAdded = true;
-  }
-
-  log("WiFi", "주변 AP 스캔 중...");
-  int attempts = 0;
-  while (wifiMulti.run() != WL_CONNECTED && attempts < WIFI_MAX_RETRY) {
+  logf("WiFi", "%s 연결 중...", WIFI_SSID);
+  WiFi.disconnect();
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  for (int i = 0; i < WIFI_MAX_RETRY; i++) {
+    if (WiFi.status() == WL_CONNECTED) {
+      logf("WiFi", "연결됨! IP: %s  RSSI: %ddBm",
+           WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      ledBlink(2, 100);
+      return true;
+    }
     delay(WIFI_RETRY_DELAY);
     Serial.print(".");
-    attempts++;
   }
   Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    logf("WiFi", "연결됨! SSID: %s  IP: %s  RSSI: %ddBm",
-         WiFi.SSID().c_str(),
-         WiFi.localIP().toString().c_str(),
-         WiFi.RSSI());
-    ledBlink(2, 100);
-    return true;
-  }
-
   log("WiFi", "연결 실패 — 다음 체크까지 대기");
   return false;
 }
@@ -191,24 +144,67 @@ void initSensors() {
   bh1750Ok = lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
   log("BH1750", bh1750Ok ? "초기화 성공" : "초기화 실패 — 배선 확인");
 
-  radarSerial.begin(115200);
-  if (radar.begin()) {
-    log("LD2410", "초기화 성공");
-  } else {
-    log("LD2410", "초기화 실패 — 배선 확인 (TX→D5, RX→D6, VCC→5V)");
-  }
+  ld2410Serial.begin(115200);  // SoftwareSerial 안정 최대치 (256000은 WiFi와 충돌 위험)
+  log("LD2410", "UART 초기화 완료");
 }
 
-// ─── LD2410 읽기 ─────────────────────────
+// ─── LD2410 파싱 ─────────────────────────
+// LD2410 기본 출력 프레임 형식:
+// F4 F3 F2 F1 [데이터] F8 F7 F6 F5
+// 데이터[0]: 상태 (0=없음, 1=이동, 2=정지, 3=이동+정지)
+// 데이터[1-2]: 이동 감지 거리 (little-endian, cm)
+// 데이터[3]: 이동 에너지
+// 데이터[4-5]: 정지 감지 거리 (little-endian, cm)
+// 데이터[6]: 정지 에너지
+// 데이터[7-8]: 감지 거리 (little-endian, cm)
 void readLd2410() {
-  radar.check();  // 프레임 처리 — 루프마다 호출
+  // LD2410 기본 출력 프레임 (26바이트):
+  // [0-3]  헤더: F4 F3 F2 F1
+  // [4-5]  데이터 길이: 0D 00 (13)
+  // [6]    0x02 (데이터 타입)
+  // [7]    상태: 0=없음 1=이동 2=정지 3=이동+정지
+  // [8-9]  이동 감지 거리 (cm, little-endian)
+  // [10]   이동 에너지
+  // [11-12] 정지 감지 거리 (cm, little-endian)
+  // [13]   정지 에너지
+  // [14-15] 감지 거리 (cm, little-endian)
+  // [16]   예약
+  // [17-18] 체크섬
+  // [19]   0x02
+  // [20-23] 푸터: F8 F7 F6 F5
+  // [24-25] 예약
 
-  occupied   = radar.presenceDetected();
-  distanceCm = radar.movingTargetDetected()
-               ? radar.movingTargetDistance()
-               : radar.stationaryTargetDetected()
-                 ? radar.stationaryTargetDistance()
-                 : 0;
+  const int FRAME_SIZE = 26;
+
+  while (ld2410Serial.available() >= FRAME_SIZE) {
+    uint8_t b = ld2410Serial.read();
+    if (b != 0xF4) continue;
+
+    uint8_t frame[FRAME_SIZE];
+    frame[0] = b;
+    int readBytes = ld2410Serial.readBytes(frame + 1, FRAME_SIZE - 1);
+    if (readBytes < FRAME_SIZE - 1) break;
+
+    // 헤더 검증
+    if (frame[1] != 0xF3 || frame[2] != 0xF2 || frame[3] != 0xF1) continue;
+
+    // 푸터 검증 (frame[20]~[23])
+    if (frame[20] != 0xF8 || frame[21] != 0xF7 ||
+        frame[22] != 0xF6 || frame[23] != 0xF5) {
+      log("LD2410", "푸터 불일치 — 프레임 버림");
+      continue;
+    }
+
+    // 데이터 길이 확인
+    uint16_t dataLen = frame[4] | (frame[5] << 8);
+    if (dataLen != 13) continue;  // 표준 보고 프레임은 13바이트
+
+    uint8_t status = frame[7];
+    occupied   = (status > 0);
+    distanceCm = (int)(frame[14] | (frame[15] << 8));
+
+    break;
+  }
 }
 
 // ─── setup ───────────────────────────────
@@ -248,35 +244,8 @@ void loop() {
     ESP.restart();
   }
 
-  // ── LD2410 상시 읽기 + 재실 디바운스 ──
+  // ── LD2410 상시 읽기 (루프마다) ──
   readLd2410();
-
-  bool newOcc = occupied;  // readLd2410()에서 갱신된 값
-  if (newOcc != prevOccupied) {
-    if (!occChanging) {
-      occChanging    = true;
-      occChangeTime  = now;
-      pendingOccupied = newOcc;
-      logf("재실", "상태 변화 감지 (%s → %s) — %lus 대기",
-           prevOccupied ? "재실" : "비어있음",
-           newOcc       ? "재실" : "비어있음",
-           OCC_DEBOUNCE_MS / 1000);
-    } else if (newOcc != pendingOccupied) {
-      occChanging = false;  // 방향 바뀌면 리셋
-      log("재실", "상태 불안정 — 디바운스 리셋");
-    }
-  } else {
-    if (occChanging) { occChanging = false; }
-  }
-
-  // 디바운스 확정 → 즉시 전송
-  if (occChanging && now - occChangeTime >= OCC_DEBOUNCE_MS) {
-    occChanging  = false;
-    prevOccupied = pendingOccupied;
-    logf("재실", "확정: %s  거리:%dcm → 즉시 전송",
-         prevOccupied ? "재실 중" : "비어 있음", distanceCm);
-    sendEventToSupabase(NAN, NAN, 0, distanceCm);  // 조도 없이 재실만
-  }
 
   // ── 5초마다 샘플 수집 ──
   if (now - lastSampleTime >= SAMPLE_INTERVAL) {
@@ -304,18 +273,6 @@ void loop() {
     // BH1750 읽기
     float l = bh1750Ok ? lightMeter.readLightLevel() : 0;
 
-    // ── 조도 급변 감지 → 즉시 전송 ──
-    if (bh1750Ok && l >= 0 && prevLux >= 0) {
-      if (abs(l - prevLux) >= LUX_EVENT_THRESHOLD) {
-        logf("조도", "급변 감지 (%.0f → %.0flx, 차이 %.0flx) → 즉시 전송",
-             prevLux, l, abs(l - prevLux));
-        sendEventToSupabase(l, NAN, 0, distanceCm);  // 재실 없이 조도만
-        prevLux = l;
-      }
-    } else if (prevLux < 0 && l >= 0) {
-      prevLux = l;  // 초기값 설정
-    }
-
     // 유효성 검사 후 누적
     bool tempHumiOk = !isnan(t) && !isnan(h) && t > -10 && t < 60 && h >= 0 && h <= 100;
     bool co2Ok      = rawCo2 > 400 && rawCo2 < 5000;  // 실내 유효 범위
@@ -329,60 +286,6 @@ void loop() {
       sampleFail = 0;
       logf("샘플", "#%d  CO2:%dppm  온도:%.1f°C  습도:%.1f%%  조도:%.0flux  재실:%s(%dcm)",
            sampleCount, rawCo2, t, h, l, occupied ? "O" : "X", distanceCm);
-
-      // ── 방향성 감지 ──
-      if (prevCo2 > 0) {
-        int diffCo2 = (int)rawCo2 - (int)prevCo2;
-        if      (abs(diffCo2) >= TREND_CO2_MIN && diffCo2 > 0) trendCo2 = max(trendCo2 + 1, 1);
-        else if (abs(diffCo2) >= TREND_CO2_MIN && diffCo2 < 0) trendCo2 = min(trendCo2 - 1, -1);
-        else                                                     trendCo2 = 0;
-      }
-      if (!isnan(prevTemp)) {
-        float diffTemp = t - prevTemp;
-        if      (abs(diffTemp) >= TREND_TEMP_MIN && diffTemp > 0) trendTemp = max(trendTemp + 1, 1);
-        else if (abs(diffTemp) >= TREND_TEMP_MIN && diffTemp < 0) trendTemp = min(trendTemp - 1, -1);
-        else                                                        trendTemp = 0;
-      }
-      if (!isnan(prevHumi)) {
-        float diffHumi = h - prevHumi;
-        if      (abs(diffHumi) >= TREND_HUMI_MIN && diffHumi > 0) trendHumi = max(trendHumi + 1, 1);
-        else if (abs(diffHumi) >= TREND_HUMI_MIN && diffHumi < 0) trendHumi = min(trendHumi - 1, -1);
-        else                                                        trendHumi = 0;
-      }
-
-      prevCo2  = rawCo2;
-      prevTemp = t;
-      prevHumi = h;
-
-      logf("방향", "CO2:%+d  온도:%+d  습도:%+d",
-           trendCo2, trendTemp, trendHumi);
-
-      // ── 급변 감지 → 즉시 전송 ──
-      bool surge =
-        abs(trendCo2)  >= TREND_COUNT ||
-        abs(trendTemp) >= TREND_COUNT ||
-        abs(trendHumi) >= TREND_COUNT;
-
-      if (surge && sampleCount > 0) {
-        logf("급변", "방향 연속 %d회 감지 → 즉시 전송 (CO2:%+d 온도:%+d 습도:%+d)",
-             TREND_COUNT, trendCo2, trendTemp, trendHumi);
-
-        float urgTemp = sumTemp / sampleCount;
-        float urgHumi = sumHumi / sampleCount;
-        float urgLux  = sumLux  / sampleCount;
-        int   urgCo2  = (int)(sumCo2 / sampleCount);
-
-        bool sent = sendToSupabase(urgTemp, urgHumi, urgCo2, urgLux, occupied, distanceCm);
-        if (sent) {
-          sumTemp = sumHumi = sumLux = 0;
-          sumCo2  = 0;
-          sampleCount = 0;
-          lastSendTime = now;   // 1분 타이머 리셋
-          trendCo2 = trendTemp = trendHumi = 0;  // 방향 카운터 리셋
-          log("급변", "즉시 전송 성공 — 타이머 리셋");
-        }
-      }
-
     } else if (!isnan(t) || rawCo2 > 0) {
       // 값은 왔는데 범위 벗어난 경우만 실패 카운트
       sampleFail++;
@@ -450,48 +353,6 @@ void loop() {
       }
     }
   }
-}
-
-// ─── 이벤트 전송 (조도/재실 즉시) ──────────
-// lux=NAN이면 조도 제외, dist=-1이면 재실 제외
-bool sendEventToSupabase(float lux, float temp, int co2, int dist) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  JsonDocument doc;
-  doc["device_id"] = DEVICE_ID;
-  doc["occupied"]  = occupied;
-  doc["distance"]  = dist >= 0 ? dist : 0;
-  if (!isnan(lux))  doc["lux"]         = round(lux);
-  if (!isnan(temp)) doc["temperature"]  = round(temp * 10) / 10.0;
-  if (co2 > 0)      doc["co2"]          = co2;
-
-  String payload;
-  serializeJson(doc, payload);
-
-  std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
-  client->setInsecure();
-  client->setTimeout(10);
-
-  HTTPClient https;
-  String url = String(SUPABASE_URL) + "/rest/v1/study_env_logs";
-  if (!https.begin(*client, url)) return false;
-
-  https.addHeader("Content-Type", "application/json");
-  https.addHeader("apikey",        SUPABASE_KEY);
-  https.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
-  https.addHeader("Prefer",        "return=minimal");
-  https.setTimeout(10000);
-
-  int  httpCode = https.POST(payload);
-  bool success  = (httpCode == 201);
-  if (success) {
-    logf("이벤트", "✓ 전송 성공");
-    lastSuccessTime = millis();
-  } else {
-    logf("이벤트", "✗ 오류: %d", httpCode);
-  }
-  https.end();
-  return success;
 }
 
 // ─── Supabase 전송 ───────────────────────

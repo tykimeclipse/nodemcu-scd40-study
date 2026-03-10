@@ -53,7 +53,7 @@ const int   CO2_WARN_RED    = 1500;  // 경고 (즉시 환기)
 
 // 측정/전송 간격
 const unsigned long SAMPLE_INTERVAL = 5000;   // 5초마다 샘플
-const unsigned long SEND_INTERVAL   = 60000;  // 1분마다 전송
+const unsigned long SEND_INTERVAL   = 30000;  // 1분마다 전송
 // ═════════════════════════════════════════
 
 // WiFi 설정
@@ -97,17 +97,6 @@ int   trendCo2 = 0, trendTemp = 0,  trendHumi = 0;
 // LD2410는 평균 내지 않고 최신값 사용
 bool occupied    = false;
 int  distanceCm  = 0;
-
-// ─── 조도/재실 이벤트 전송 ───────────────
-// ★ 임계값 조정 가능
-const float LUX_EVENT_THRESHOLD = 50.0;  // 조도 변화량 (lx) — 이 이상 변하면 즉시 전송
-const unsigned long OCC_DEBOUNCE_MS = 3000;  // 재실 상태 확정 대기 시간 (ms) — 노이즈 방지
-
-float prevLux         = -1;       // 직전 전송 조도값 (-1=초기값)
-bool  prevOccupied    = false;    // 직전 전송 재실상태
-bool  pendingOccupied = false;    // 감지 중인 재실상태 (확정 전)
-bool  occChanging     = false;    // 재실 상태 변화 감지 중
-unsigned long occChangeTime = 0;  // 재실 상태 변화 감지 시각
 
 // ─── 타이머 ──────────────────────────────
 unsigned long lastSampleTime  = 0;
@@ -248,35 +237,8 @@ void loop() {
     ESP.restart();
   }
 
-  // ── LD2410 상시 읽기 + 재실 디바운스 ──
+  // ── LD2410 상시 읽기 (루프마다) ──
   readLd2410();
-
-  bool newOcc = occupied;  // readLd2410()에서 갱신된 값
-  if (newOcc != prevOccupied) {
-    if (!occChanging) {
-      occChanging    = true;
-      occChangeTime  = now;
-      pendingOccupied = newOcc;
-      logf("재실", "상태 변화 감지 (%s → %s) — %lus 대기",
-           prevOccupied ? "재실" : "비어있음",
-           newOcc       ? "재실" : "비어있음",
-           OCC_DEBOUNCE_MS / 1000);
-    } else if (newOcc != pendingOccupied) {
-      occChanging = false;  // 방향 바뀌면 리셋
-      log("재실", "상태 불안정 — 디바운스 리셋");
-    }
-  } else {
-    if (occChanging) { occChanging = false; }
-  }
-
-  // 디바운스 확정 → 즉시 전송
-  if (occChanging && now - occChangeTime >= OCC_DEBOUNCE_MS) {
-    occChanging  = false;
-    prevOccupied = pendingOccupied;
-    logf("재실", "확정: %s  거리:%dcm → 즉시 전송",
-         prevOccupied ? "재실 중" : "비어 있음", distanceCm);
-    sendEventToSupabase(NAN, NAN, 0, distanceCm);  // 조도 없이 재실만
-  }
 
   // ── 5초마다 샘플 수집 ──
   if (now - lastSampleTime >= SAMPLE_INTERVAL) {
@@ -303,18 +265,6 @@ void loop() {
 
     // BH1750 읽기
     float l = bh1750Ok ? lightMeter.readLightLevel() : 0;
-
-    // ── 조도 급변 감지 → 즉시 전송 ──
-    if (bh1750Ok && l >= 0 && prevLux >= 0) {
-      if (abs(l - prevLux) >= LUX_EVENT_THRESHOLD) {
-        logf("조도", "급변 감지 (%.0f → %.0flx, 차이 %.0flx) → 즉시 전송",
-             prevLux, l, abs(l - prevLux));
-        sendEventToSupabase(l, NAN, 0, distanceCm);  // 재실 없이 조도만
-        prevLux = l;
-      }
-    } else if (prevLux < 0 && l >= 0) {
-      prevLux = l;  // 초기값 설정
-    }
 
     // 유효성 검사 후 누적
     bool tempHumiOk = !isnan(t) && !isnan(h) && t > -10 && t < 60 && h >= 0 && h <= 100;
@@ -450,48 +400,6 @@ void loop() {
       }
     }
   }
-}
-
-// ─── 이벤트 전송 (조도/재실 즉시) ──────────
-// lux=NAN이면 조도 제외, dist=-1이면 재실 제외
-bool sendEventToSupabase(float lux, float temp, int co2, int dist) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  JsonDocument doc;
-  doc["device_id"] = DEVICE_ID;
-  doc["occupied"]  = occupied;
-  doc["distance"]  = dist >= 0 ? dist : 0;
-  if (!isnan(lux))  doc["lux"]         = round(lux);
-  if (!isnan(temp)) doc["temperature"]  = round(temp * 10) / 10.0;
-  if (co2 > 0)      doc["co2"]          = co2;
-
-  String payload;
-  serializeJson(doc, payload);
-
-  std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
-  client->setInsecure();
-  client->setTimeout(10);
-
-  HTTPClient https;
-  String url = String(SUPABASE_URL) + "/rest/v1/study_env_logs";
-  if (!https.begin(*client, url)) return false;
-
-  https.addHeader("Content-Type", "application/json");
-  https.addHeader("apikey",        SUPABASE_KEY);
-  https.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
-  https.addHeader("Prefer",        "return=minimal");
-  https.setTimeout(10000);
-
-  int  httpCode = https.POST(payload);
-  bool success  = (httpCode == 201);
-  if (success) {
-    logf("이벤트", "✓ 전송 성공");
-    lastSuccessTime = millis();
-  } else {
-    logf("이벤트", "✗ 오류: %d", httpCode);
-  }
-  https.end();
-  return success;
 }
 
 // ─── Supabase 전송 ───────────────────────
